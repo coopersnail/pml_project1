@@ -1,0 +1,227 @@
+---
+title: "Coursera Practical Machine Learning"
+author: "DS"
+date: "July 14, 2014"
+output: html_document
+---
+## Summary 
+This project aims at building a classification model for five different classes of weightlifting activities, variable `classe` in the data set. A random forest model is built using out-of-bag method for cross-validation. It classifies activities with over 99% accuracy. 
+
+## Packages needed
+```{r}
+library(caret)
+```
+
+## Data Description
+The data for this project is the Weight Lifting Exercise Dataset, containing personal activity data measured by motion detecting devices. It originally comes from [this source:](http://groupware.les.inf.puc-rio.br/har). Specifically, six young health participants were asked to perform dumbell weightlifting, in five different fashions: exactly according to the specification (Class A), throwing the elbows to the front (Class B), lifting the dumbbell only halfway (Class C), lowering the dumbbell only halfway (Class D) and throwing the hips to the front (Class E).^[Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. Qualitative Activity Recognition of Weight Lifting Exercises. Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013.]
+
+The training data can be downloaded [here](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv) and the testing data can be downloaded [here](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv).
+
+## Data Processing  
+
+**Load Data**: It is recommended that you clear your environment first with `rm(list=ls())` and make sure that you have the right working directory with need files in place. 
+
+```{r, results='hide'}
+# load data
+train <- read.csv("pml-training.csv", header = T, na.strings = c("","NA"))# examining the data reveals that some variables have empty entries instead of NA
+
+# preliminary review of data
+# names(train)
+# str(train)
+# head(train)
+```
+
+There are a number of variables with many empty entries `""` instead of NA's. The code below examines whether there are any special properties associated with these variables. Based on this exploratory analysis, they are ulitmately excluded from model building. 
+```{r, results='hide'}
+# # check if non-NAs in certain variables lined up with classes
+# t <- read.csv("pml-training.csv", header = T, stringsAsFactors = F)
+# table(t$max_yaw_forearm, t$classe)
+# checkVar <- unlist(lapply(t, function(x){"" %in% x}))
+# names(t[,checkVar==T])
+# # look for near-zero-variance variables
+# nzv_t <- nearZeroVar(t,saveMetrics=TRUE)
+# nzv_t
+# all.equal(names(t[,checkVar==T]), rownames(nsv[nsv$nzv==T,])) # FALSE
+# names(t[,checkVar==T]) %in% rownames(nsv[nsv$nzv==T,]) # All TRUE
+# all.equal(t$kurtosis_roll_belt!="", t$amplitude_yaw_forearm!="")
+# all.equal(t$kurtosis_roll_belt!="", t$new_window=="yes") # these non-NAs are all recorded when a new time window begins
+# # they may be summary data
+# sum(t$kurtosis_roll_belt!="")
+# # since they all have very little variance discard these variables for now 
+```
+
+**Data Cleaning**: There is some degree of exploratory analysis here. Strickly speaking, explortoratory analysis should be done only on the model budling training set, after the test set is partitioned out. This is done in the data cleaning stage,however, to structure the training and testing set in the same manner.  
+
+First, the percentages of missing values in all variables are checked to see if data imputation is needed. 
+```{r, results='hide'}
+totalObs <- nrow(train)
+lapply(train, function(x){sum(is.na(x))/totalObs})
+table(unlist(lapply(train, function(x){sum(is.na(x))/totalObs}))) 
+```
+In fact, many variables have more than 97% missing, basically useless even after imputation because of limited variance. Therefore, they are excluded from modeling.
+```{r}
+# remove variables with large number of NA's
+l <- unlist(lapply(train, function(x){sum(is.na(x))/totalObs}))
+keep_var <- names(l[l<0.5])
+
+train_small <- train[, which(names(train) %in% keep_var)] # keep only variables with no or few NAs
+# str(train_small)
+```
+
+Second, the factor variables, `user_name`, `cvtd_timestamp`, `new_window`. These variables are ploted against `classe` to see if they are meaningful.
+```{r}
+par(mfrow=c(2,2))
+plot(train_small$user_name, train_small$classe) 
+plot(train_small$new_window, train_small$classe)
+plot(train_small$cvtd_timestamp, train_small$classe)
+```
+There is no obvious pattern of `classe` with `user_name` and `new_window`. These variables are excluded from modeling. There seems to be a pattern with `cvtd_timestamp` but that is likely due the participants being instructed to perform different classes of weightlifting in a routine. Therefore, `cvtd_timestamp` has no real predictive value for future data and thus excluded. For the same reason, `raw_timestamp_part_1` and `raw_timestamp_part_2` are excluded. 
+
+Two other variables seem questionable as predictors: `X` and `num_window`. 
+```{r}
+par(mfrow=c(1,2))
+plot(train_small$num_window, train_small$classe) # a cycling pattern similar to cvtd_timestamp
+plot(train_small$X, train_small$classe)
+# length(unique(train_small$X)) #train$X seems to be row id
+```
+Evidence suggests that `X` and `num_window` are artifacts of the way data were collected and documented but not meaningful predictors. In fact they may mislead the model training. They are also excluded.  
+
+```{r, results='hide'}
+train_small <- train_small[ , -c(1:7)]
+```
+
+Next, variables are examined for their variance. None of the remaining variables have near zero variance. These variables are all included in the model training. 
+```{r, results='hide'}
+# check if there are variables with near zero variance
+nzv <- nearZeroVar(train_small,saveMetrics=TRUE)
+sum(nzv$nzv==TRUE) # none
+```
+
+
+**Data Partition**
+```{r}
+# table(train_small$classe)
+prop.table(table(train_small$classe)) # Check proportion of each class
+
+# Reserve testing set
+set.seed(4321)
+inTrain <- createDataPartition(y=train_small$classe, # outcome is classe
+                               p=0.7, list=FALSE) # 30% reserved for testing
+
+training <- train_small[inTrain,]
+testing <- train_small[-inTrain,]
+
+prop.table(table(training$classe)) # check classe proportion again
+prop.table(table(testing$classe)) # very similar to each other and the overall train_small set
+```
+
+**Exploratory Analysis**: Correlations among predictors are examined. Some variables are highly correlated. 
+```{r}
+corM <- abs(cor(training[, -53]))
+diag(corM) <- 0
+sum(corM>0.5); sum(corM>0.8)
+```
+
+## Model Training
+
+**Implement Cross Validation**: Out of `training`, 10-fold cross validation sets are created. Two `trainControl` objects are created, one is the traditional cross validation method; the other is the out-of-bag method^[http://stackoverflow.com/questions/18541923/what-is-out-of-bag-error-in-random-forests], which is equivalent to a cross validation method specific to random forest and bagged tree models^[http://caret.r-forge.r-project.org/training.html]. The error rate of the model estimated from this control method is the out of sample estimage for the random forest method.
+
+```{r, results='hide'}
+set.seed(1234)
+tc1 <- trainControl(method = "cv", number = 10)
+set.seed(1234)
+tc2 <- trainControl(method = "oob", number = 10) 
+```
+
+**Pre-Processing**: Pre-processing is also done in two ways: centering, scaling with and without principal component analysis, as exploratory analysis above shows strong collinearity among some variables. 
+```{r}
+pp1 <- c('center', 'scale')
+pp2 <- c('center', 'scale','pca')
+```
+
+
+**Model Fitting**: Several classification methods are used: including boosted logistic regression^[http://www.stata-journal.com/sjpdf.html?articlenum=st0087], recursive partition^[http://cran.r-project.org/web/packages/rpart/vignettes/longintro.pdf], regularized discriminat analysis^[http://www.slac.stanford.edu/cgi-wrap/getdoc/slac-pub-4389.pdf], and random forest^[http://en.wikipedia.org/wiki/Random_forest]. Default tuning parameters are used in selecting methods as they tend to be reasonable defaults and changing the values may not be worthwhile^[http://stats.stackexchange.com/questions/50210/caret-and-randomforest-number-of-trees].
+
+For the sake of time while compiling the HTML, codes for all models except for the best performing one is commented out. 
+```{r, cache=TRUE}
+# Boosted Logistic Regression
+# modelFit_bl1 <- train(training$classe ~ .,method="LogitBoost",pp1,data=training, trControl=tc1) #, nIter = 100) # code for tuning parameter nIter
+
+# modelFit_bl2 <- train(training$classe ~ .,method="LogitBoost",pp2,data=training, trControl=tc1)
+
+# Recursive Partitioning
+# modelFit_rpart1 <- train(training$classe ~ .,method="rpart",preProcess=pp1, data=training, trControl=tc1) #, cp = 0.01) # code for tuning parameter cp
+# modelFit_rpart2 <- train(training$classe ~ .,method="rpart",preProcess=pp2, data=training, trControl=tc1)
+
+# Regularized Discriminant Analysis 
+# WARNING: This takes a LONG time to train. 
+# modelFit_rda1 <- train(training$classe ~ .,method="rda",preProcess=pp1,data=training, trControl=tc1)  
+# modelFit_rda2 <- train(training$classe ~ .,method="rda",preProcess=pp2,data=training, trControl=tc1)
+
+# Random Forest
+modelFit_rf1 <- train(training$classe ~ .,method="rf",preProcess=pp1,data=training, trControl=tc2, importance=TRUE) # , tuneGrid = data.frame(.mtry = 5)) # code for tuning parameter mtry, not sure if tuning of parameter nTree is allowed
+# importance=TRUE is needed for plotting importance of predictors later
+
+# modelFit_rf2 <- train(training$classe ~ .,method="rf",preProcess=pp2,data=training, trControl=tc2, importance=TRUE)
+```
+
+**Cross-Validation and Model Selection**: The models built on `training` are cross-validated on `testing`. Because the proportions of different classes of activities is fairly even, accuracy is a reasonable metric for evaluating model performance. Based on the confusion matrix, the random forest method is the most promsing. Between the different random forest models, adding PCA in pre-processing actually reduces performance. The model without PCA is selected. 
+```{r, results='hide', cache=TRUE}
+# confusionMatrix(testing$classe,predict(modelFit_bl1,testing))
+# confusionMatrix(testing$classe,predict(modelFit_bl2,testing))
+# confusionMatrix(testing$classe,predict(modelFit_rpart1,testing))
+# confusionMatrix(testing$classe,predict(modelFit_rpart2,testing))
+# confusionMatrix(testing$classe,predict(modelFit_rda1,testing))
+# confusionMatrix(testing$classe,predict(modelFit_rda2,testing))
+confusionMatrix(testing$classe,predict(modelFit_rf1,testing))
+# confusionMatrix(testing$classe,predict(modelFit_rf2,testing))
+```
+
+**Error Estimation**: After using `"oob"` as a cross-validation method in `trControl`, the out-of-sample error estimate simply is 1 - accuracy from the model^[http://stats.stackexchange.com/questions/77290/does-party-package-in-r-provide-out-of-bag-estimates-of-error-for-random-forest].
+```{r}
+str(modelFit_rf1$results)
+oob_err <- 1-mean(modelFit_rf1$results$Accuracy)
+
+```
+The expected error rate is `r round(oob_err, 4)*100`%. 
+
+The error rate can be compared to the error rate from the confusion matrix, which cross-validates the model on the hold-out data set `testing`. 
+```{r}
+acc_rf <- confusionMatrix(testing$classe,predict(modelFit_rf1,testing))$overall[1]
+err_rf <- 1 - acc_rf 
+```
+The cross-validation error rate is `r round(err_rf, 4)*100`%. The two are very similar. 
+
+**Importance of Variables**: The plot below shows that, in general, `pitch_bell`, `roll_belt`, and `yaw_belt` are the most important variables in predicting `classe`. 
+
+```{r, fig.width=8, fig.height=12}
+rfImp <- varImp(modelFit_rf1, scale = FALSE)
+plot(rfImp)
+# caret:::plot.varImp.train(rfImp) # equivalent to above
+```
+
+
+## Predciting Test Set
+Code for predicting the 20 new data points is shown below.
+```{r}
+# # load data
+# test_set <- read.csv("pml-testing.csv", header = T, na.strings = c("","NA"))
+# # structure the test set in the same way as above
+# test_small <- test_set[, which(names(test_set) %in% names(train_small))]
+# 
+# answers <- predict(modelFit_rf,test_small)
+
+# Code for writing files for answers 
+# answers <- as.character(answers)
+# 
+# pml_write_files = function(x){
+#   n = length(x)
+#   for(i in 1:n){
+#     filename = paste0("problem_id_",i,".txt")
+#     write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+#   }
+# }
+# 
+# pml_write_files(answers)
+```
+
