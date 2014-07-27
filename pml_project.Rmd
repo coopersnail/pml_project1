@@ -144,6 +144,7 @@ pp2 <- c('center', 'scale','pca')
 
 For the sake of time while compiling the HTML, codes for all models except for the best performing one is commented out. 
 ```{r, cache=TRUE}
+set.seed(999)
 # Boosted Logistic Regression
 # modelFit_bl1 <- train(training$classe ~ .,method="LogitBoost",pp1,data=training, trControl=tc1) #, nIter = 100) # code for tuning parameter nIter
 
